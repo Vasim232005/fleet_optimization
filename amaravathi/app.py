@@ -96,12 +96,46 @@ def get_dist(p1, p2):
     return geodesic((p1['lat'], p1['lon']), (p2['lat'], p2['lon'])).kilometers
 
 def get_coords(addr):
-    try:
-        geo = Nominatim(user_agent="quantum_route_v2")
-        res = geo.geocode(addr)
-        return (res.latitude, res.longitude) if res else None
-    except:
-        return None
+    import concurrent.futures
+    from geopy.geocoders import Nominatim, Photon
+    from geopy.exc import GeopyError
+    import requests
+    
+    # 1. Check Session Cache (Instant result)
+    if 'geo_cache' not in st.session_state:
+        st.session_state.geo_cache = {}
+    
+    clean_addr = addr.strip().lower()
+    if clean_addr in st.session_state.geo_cache:
+        return st.session_state.geo_cache[clean_addr]
+
+    # 2. Parallel Race (Fastest service wins)
+    def fetch(geocoder, query):
+        try:
+            res = geocoder.geocode(query, timeout=5)
+            return (res.latitude, res.longitude) if res else None
+        except:
+            return None
+
+    # Nominatim and Photon are both free OSM-based services
+    services = [
+        Nominatim(user_agent="QuantumRoute_Fast_v2_Project"),
+        Photon(user_agent="QuantumRoute_Fast_v2_Project")
+    ]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(services)) as executor:
+        # Submit both requests at the same time
+        futures = {executor.submit(fetch, s, addr): s for s in services}
+        
+        # Return the first one that succeeds
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                # Store in cache for next time
+                st.session_state.geo_cache[clean_addr] = result
+                return result
+
+    return "NOT_FOUND"
 
 def get_road_path(p1, p2):
     """Fetches high-fidelity road geometry from OSRM"""
@@ -271,35 +305,37 @@ STATUS_COLOR = {"Waiting": "gray", "Ready": "green", "On Mission": "blue", "Brok
 # ================= SIDEBAR =================
 with st.sidebar:
     st.title("Fleet Control")
-
-
     st.markdown("---")
     hub_addr = st.text_input("Add Hub Location", placeholder="e.g. New York, NY")
     if st.button("📍 Add Hub"):
         with st.spinner("Geocoding..."):
-            c = get_coords(hub_addr)
-            if c:
-                st.session_state.hubs = [{'name': hub_addr, 'lat': c[0], 'lon': c[1]}]
+            res = get_coords(hub_addr)
+            if isinstance(res, tuple):
+                st.session_state.hubs = [{'name': hub_addr, 'lat': res[0], 'lon': res[1]}]
                 for v in st.session_state.fleet.values():
-                    v['pos'] = {'lat': c[0], 'lon': c[1]}
-                    v['start_pos'] = {'lat': c[0], 'lon': c[1]}
+                    v['pos'] = {'lat': res[0], 'lon': res[1]}
+                    v['start_pos'] = {'lat': res[0], 'lon': res[1]}
                     v['status'] = "Ready"
                 st.session_state.final_analysis = None
                 st.success(f"Hub added: {hub_addr}")
                 st.rerun()
+            elif res == "NOT_FOUND":
+                st.error(f"Address not found: '{hub_addr}'. Please check the spelling.")
             else:
-                st.error("Location not found.")
+                st.error(f"Geocoding Service Error: {res}")
 
     stop_addr = st.text_input("Add Delivery Stop", placeholder="e.g. Brooklyn, NY")
     if st.button("📦 Add Stop"):
         with st.spinner("Geocoding..."):
-            c = get_coords(stop_addr)
-            if c:
-                st.session_state.stops.append({'name': stop_addr, 'lat': c[0], 'lon': c[1]})
+            res = get_coords(stop_addr)
+            if isinstance(res, tuple):
+                st.session_state.stops.append({'name': stop_addr, 'lat': res[0], 'lon': res[1]})
                 st.success(f"Stop added: {stop_addr}")
                 st.rerun()
+            elif res == "NOT_FOUND":
+                st.error(f"Address not found: '{stop_addr}'. Please check the spelling.")
             else:
-                st.error("Location not found.")
+                st.error(f"Geocoding Service Error: {res}")
     
     st.markdown("---")
     st.subheader("⚛️ Quantum Console")
